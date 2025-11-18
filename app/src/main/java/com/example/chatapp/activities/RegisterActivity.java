@@ -33,7 +33,7 @@ public class RegisterActivity extends AppCompatActivity {
     private Button buttonRegister;
 
     // 单线程池（也可以根据需要改成固定线程数的池）
-    private final ExecutorService executor = Executors.newSingleThreadExecutor();
+    private final ExecutorService executor = Executors.newFixedThreadPool(4);
     private final OkHttpClient client = new OkHttpClient();
 
     // Handler 运行在主线程
@@ -82,7 +82,7 @@ public class RegisterActivity extends AppCompatActivity {
                         .build();
 
                 Request request = new Request.Builder()
-                        .url("http://10.0.2.2:8081/insert")   // 你的服务器地址
+                        .url("http://47.100.72.149:8081/insert")   // 你的服务器地址
                         .post(body)
                         .build();
 

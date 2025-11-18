@@ -14,7 +14,8 @@
         android:usesCleartextTraffic="true"
         android:roundIcon="@mipmap/ic_launcher_round"
         android:supportsRtl="true"
-        android:theme="@style/Theme.ChatApp" >
+        android:theme="@style/Theme.ChatApp"
+        android:name=".App" >
         <activity android:name=".activities.ChatActivity" />
         <activity android:name=".activities.RegisterActivity" />
         <activity android:exported="true"

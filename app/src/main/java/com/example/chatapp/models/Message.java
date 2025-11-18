@@ -15,10 +15,18 @@ public class Message {
     @ColumnInfo(name = "sent_at")
     private long sentAt;
     @ColumnInfo(name = "isSynced")
-    private boolean isSynced;
+    private int isSynced;
+
+    public int getId() {
+        return id;
+    }
 
     public long getSenderId() {
         return senderId;
+    }
+
+    public void setId(int id) {
+        this.id = id;
     }
 
     public void setSenderId(long senderId) {
@@ -41,11 +49,11 @@ public class Message {
         this.sentAt = sentAt;
     }
 
-    public boolean isSynced() {
+    public int getIsSynced() {
         return isSynced;
     }
 
-    public void setSynced(boolean synced) {
-        isSynced = synced;
+    public void setIsSynced(int isSynced) {
+        this.isSynced = isSynced;
     }
 }

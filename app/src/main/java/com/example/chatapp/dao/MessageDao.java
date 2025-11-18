@@ -11,12 +11,15 @@ import java.util.List;
 
 @Dao
 public interface MessageDao {
-    @Query("SELECT * FROM messages")
-    List<Message> getAll();
-
     @Insert
-    void insertAll(Message... messages);
+    void insert(Message message);
 
-    @Delete
-    void delete(Message message);
+    @Query("SELECT * FROM messages ORDER BY sent_at ASC")
+    List<Message> getAllMessagesOrdered();
+
+    @Query("DELETE FROM messages WHERE isSynced = 1")
+    void deleteAllSynced();
+
+    @Query("UPDATE messages SET isSynced = 1 WHERE sender_id = :senderId AND isSynced = 0")
+    void markLastUnsyncedAsSynced(long senderId);
 }

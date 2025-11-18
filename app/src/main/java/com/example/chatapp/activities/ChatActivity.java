@@ -1,9 +1,9 @@
 package com.example.chatapp.activities;
 
 import android.icu.text.SimpleDateFormat;
-import android.os.AsyncTask;
 import android.os.Bundle;
-import android.view.View;
+import android.os.Handler;
+import android.os.Looper;
 import android.widget.Button;
 import android.widget.EditText;
 import android.widget.Toast;
@@ -11,8 +11,8 @@ import android.widget.Toast;
 import androidx.appcompat.app.AppCompatActivity;
 import androidx.recyclerview.widget.LinearLayoutManager;
 import androidx.recyclerview.widget.RecyclerView;
-import androidx.room.Room;
 
+import com.example.chatapp.App;
 import com.example.chatapp.R;
 import com.example.chatapp.adapter.MessageAdapter;
 import com.example.chatapp.database.AppDatabase;
@@ -21,205 +21,198 @@ import com.example.chatapp.models.Message;
 import org.json.JSONArray;
 import org.json.JSONObject;
 
-import java.io.BufferedReader;
-import java.io.DataOutputStream;
-import java.io.InputStreamReader;
-import java.net.HttpURLConnection;
-import java.net.URL;
-import java.nio.charset.StandardCharsets;
 import java.text.ParseException;
 import java.util.ArrayList;
 import java.util.Date;
 import java.util.List;
 import java.util.Locale;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+
+import okhttp3.MediaType;
+import okhttp3.Request;
+import okhttp3.RequestBody;
+import okhttp3.Response;
 
 public class ChatActivity extends AppCompatActivity {
+
+    private static final MediaType JSON_TYPE = MediaType.get("application/json; charset=utf-8");
 
     private RecyclerView recyclerViewMessages;
     private EditText editTextMessage;
     private Button buttonSend;
     private MessageAdapter messageAdapter;
-    private List<Message> messageList;
-    private static final String PREFS_NAME = "MyPrefs";
-    private static final String KEY_COOKIE = "session_cookie";
-    AppDatabase db = Room.databaseBuilder(getApplicationContext(), AppDatabase.class, "chat").build();
+    private final List<Message> messageList = new ArrayList<>();
+
+    // 直接使用 App 中全局单例的 OkHttpClient（自动带 Cookie）
+    // private final OkHttpClient client = new OkHttpClient();   ← 删除这行
+
+    private final ExecutorService executor = Executors.newFixedThreadPool(4);
+    private final Handler uiHandler = new Handler(Looper.getMainLooper());
+
+    private AppDatabase db;
+    private final long currentUserId = 1L; // 实际项目中从登录信息获取
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
         setContentView(R.layout.activity_chat);
 
-        // 初始化控件
+        db = App.getDatabase();  // 正确方式获取数据库
+
+        initViews();
+        setupRecyclerView();
+        loadAllMessages();
+
+        buttonSend.setOnClickListener(v -> {
+            String text = editTextMessage.getText().toString().trim();
+            if (text.isEmpty()) {
+                Toast.makeText(this, "请输入消息", Toast.LENGTH_SHORT).show();
+                return;
+            }
+
+            // 1. 本地立即显示
+            Message localMsg = new Message();
+            localMsg.setSenderId(currentUserId);
+            localMsg.setMessage(text);
+            localMsg.setSentAt(System.currentTimeMillis());
+            localMsg.setIsSynced(0);
+
+            executor.execute(() -> {
+                db.messageDao().insert(localMsg);
+                runOnUiThread(this::loadLocalMessagesOnly);
+            });
+
+            editTextMessage.setText("");
+            // 2. 后台上传
+            uploadMessage(text);
+        });
+    }
+
+    private void initViews() {
         recyclerViewMessages = findViewById(R.id.recyclerViewMessages);
         editTextMessage = findViewById(R.id.editTextMessage);
         buttonSend = findViewById(R.id.buttonSend);
+    }
 
-        // 初始化消息列表和适配器
-        messageList = new ArrayList<>();
+    private void setupRecyclerView() {
         messageAdapter = new MessageAdapter(messageList);
+        LinearLayoutManager lm = new LinearLayoutManager(this);
+        lm.setStackFromEnd(true);
+        recyclerViewMessages.setLayoutManager(lm);
         recyclerViewMessages.setAdapter(messageAdapter);
-        LinearLayoutManager layoutManager = new LinearLayoutManager(this);
-        layoutManager.setStackFromEnd(true); // 从底部开始显示
-        recyclerViewMessages.setLayoutManager(layoutManager);
+    }
 
-        // 加载聊天消息
-        new FetchMessagesTask().execute();
+    private void uploadMessage(String content) {
+        executor.execute(() -> {
+            try {
+                JSONObject json = new JSONObject();
+                json.put("message", content);
 
-        // 发送按钮点击事件
-        buttonSend.setOnClickListener(new View.OnClickListener() {
-            @Override
-            public void onClick(View v) {
-                String message = editTextMessage.getText().toString().trim();
-                if (message.isEmpty()) {
-                    Toast.makeText(ChatActivity.this, "请输入消息", Toast.LENGTH_SHORT).show();
-                    return;
+                Request request = new Request.Builder()
+                        .url("http://47.100.72.149:8081/message")
+                        .post(RequestBody.create(json.toString(), JSON_TYPE))
+                        .build();
+
+                try (Response response = App.client.newCall(request).execute()) {
+                    boolean success = response.isSuccessful();
+                    if (success) {
+                        db.messageDao().markLastUnsyncedAsSynced(currentUserId);
+                    }
+                    String tip = success ? "发送成功" : "发送失败（已保存本地）";
+                    uiHandler.post(() -> Toast.makeText(this, tip, Toast.LENGTH_SHORT).show());
                 }
-                new SendMessageTask().execute(message);
-                editTextMessage.setText(""); // 清空输入框
+            } catch (Exception e) {
+                uiHandler.post(() -> Toast.makeText(this, "网络错误，消息已保存本地", Toast.LENGTH_SHORT).show());
             }
         });
     }
 
-    // 异步任务：获取所有消息
-    private class FetchMessagesTask extends AsyncTask<Void, Void, String> {
+    private void loadLocalMessagesOnly() {
+        executor.execute(() -> {
+            List<Message> local = db.messageDao().getAllMessagesOrdered();
+            runOnUiThread(() -> {
+                messageList.clear();
+                messageList.addAll(local);
+                messageAdapter.updateMessages(local);
+                recyclerViewMessages.scrollToPosition(local.size() - 1);
+            });
+        });
+    }
 
-        @Override
-        protected String doInBackground(Void... voids) {
-            String urlString = "http://10.0.2.2:8081/messages";
-            try {
-                URL url = new URL(urlString);
-                HttpURLConnection conn = (HttpURLConnection) url.openConnection();
-                conn.setRequestMethod("GET");
-                // 添加 session cookie
-                conn = LoginActivity.addSessionCookie(conn, ChatActivity.this);
+    private void loadAllMessages() {
+        executor.execute(() -> {
+            List<Message> server = fetchMessagesFromServer();
 
-                int responseCode = conn.getResponseCode();
-                if (responseCode == HttpURLConnection.HTTP_OK) {
-                    BufferedReader in = new BufferedReader(new InputStreamReader(conn.getInputStream()));
-                    StringBuilder response = new StringBuilder();
-                    String line;
-                    while ((line = in.readLine()) != null) {
-                        response.append(line);
-                    }
-                    in.close();
-                    return response.toString();
-                } else {
-                    return "获取消息失败，响应码: " + responseCode;
+            if (server != null) {
+                db.messageDao().deleteAllSynced();
+                for (Message m : server) {
+                    m.setIsSynced(1);
+                    db.messageDao().insert(m);
                 }
-            } catch (Exception e) {
-                e.printStackTrace();
-                return "获取消息失败: " + e.getMessage();
             }
-        }
 
-        @Override
-        protected void onPostExecute(String result) {
-            if (result.startsWith("获取消息失败")) {
-                Toast.makeText(ChatActivity.this, result, Toast.LENGTH_LONG).show();
-                return;
+            List<Message> finalList = db.messageDao().getAllMessagesOrdered();
+            runOnUiThread(() -> {
+                messageList.clear();
+                messageList.addAll(finalList);
+                messageAdapter.updateMessages(finalList);
+                recyclerViewMessages.scrollToPosition(finalList.size() - 1);
+            });
+        });
+    }
+
+    private List<Message> fetchMessagesFromServer() {
+        try {
+            Request request = new Request.Builder()
+                    .url("http://47.100.72.149:8081/messages")
+                    .get()
+                    .build();
+
+            try (Response response = App.client.newCall(request).execute()) {
+                if (!response.isSuccessful() || response.body() == null) return null;
+                return parseMessagesJson(response.body().string());
             }
-            try {
-                // 假设服务器返回的 DATETIME 格式为 "2025-11-16 15:19:36"
-                // ⚠️ 格式必须严格匹配服务器返回的字符串
-                SimpleDateFormat formatter = new SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.getDefault());
-
-                // 解析 JSON 数组
-                JSONArray jsonArray = new JSONArray(result);
-                List<Message> messages = new ArrayList<>();
-
-                for (int i = 0; i < jsonArray.length(); i++) {
-                    JSONObject json = jsonArray.getJSONObject(i);
-                    Message message = new Message();
-
-                    // 核心逻辑保持不变
-                    message.setSenderId(json.getLong("senderId"));
-                    message.setMessage(json.getString("message"));
-
-                    // 🚀 错误解决点：类型转换
-                    String sentAtString = json.optString("sentAt", ""); // 获取字符串
-                    long sentAtLong = 0L;
-
-                    if (!sentAtString.isEmpty()) {
-                        try {
-                            Date date = formatter.parse(sentAtString);
-                            sentAtLong = date.getTime(); // 转换为 long 毫秒时间戳
-                        } catch (ParseException e) {
-                            // 如果日期格式解析失败，打印错误，使用默认值 0L
-                            e.printStackTrace();
-                        }
-                    }
-
-                    message.setSentAt(sentAtLong); // 传入 long 类型
-                    messages.add(message);
-                }
-
-                // 更新 RecyclerView
-                messageAdapter.updateMessages(messages);
-                recyclerViewMessages.scrollToPosition(messages.size() - 1);
-
-            } catch (Exception e) {
-                e.printStackTrace();
-                // 统一处理 JSON 或其他异常
-                Toast.makeText(ChatActivity.this, "处理消息失败: " + e.getMessage(), Toast.LENGTH_LONG).show();
-            }
+        } catch (Exception e) {
+            e.printStackTrace();
+            return null;
         }
     }
 
-    // 异步任务：发送消息
-    private class SendMessageTask extends AsyncTask<String, Void, String> {
+    private List<Message> parseMessagesJson(String json) {
+        List<Message> list = new ArrayList<>();
+        try {
+            SimpleDateFormat sdf = new SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.getDefault());
+            JSONArray array = new JSONArray(json);
 
-        @Override
-        protected String doInBackground(String... params) {
-            String message = params[0];
-            String urlString = "http://10.0.2.2:8081/message";
-            try {
-                URL url = new URL(urlString);
-                HttpURLConnection conn = (HttpURLConnection) url.openConnection();
-                conn.setRequestMethod("POST");
-                conn.setDoOutput(true);
-                conn.setRequestProperty("Content-Type", "application/json; charset=UTF-8");
-                // 添加 session cookie
-                conn = LoginActivity.addSessionCookie(conn, ChatActivity.this);
+            for (int i = 0; i < array.length(); i++) {
+                JSONObject obj = array.getJSONObject(i);
 
-                // 构造 JSON 请求
-                JSONObject json = new JSONObject();
-                json.put("message", message);
-                String postData = json.toString();
-                byte[] postDataBytes = postData.getBytes(StandardCharsets.UTF_8);
+                Message msg = new Message();
+                msg.setSenderId(obj.getLong("senderId"));
+                msg.setMessage(obj.getString("message"));
 
-                // 发送请求
-                DataOutputStream os = new DataOutputStream(conn.getOutputStream());
-                os.write(postDataBytes);
-                os.flush();
-                os.close();
-
-                // 获取响应
-                int responseCode = conn.getResponseCode();
-                if (responseCode == HttpURLConnection.HTTP_OK) {
-                    BufferedReader in = new BufferedReader(new InputStreamReader(conn.getInputStream()));
-                    StringBuilder response = new StringBuilder();
-                    String line;
-                    while ((line = in.readLine()) != null) {
-                        response.append(line);
-                    }
-                    in.close();
-                    return response.toString();
-                } else {
-                    return "发送消息失败，响应码: " + responseCode;
+                String timeStr = obj.optString("sentAt", null);
+                if (timeStr != null && !timeStr.trim().isEmpty()) {
+                    try {
+                        Date date = sdf.parse(timeStr);
+                        if (date != null) msg.setSentAt(date.getTime());
+                    } catch (ParseException ignored) { }
                 }
-            } catch (Exception e) {
-                e.printStackTrace();
-                return "发送消息失败: " + e.getMessage();
-            }
-        }
+                if (msg.getSentAt() == 0) msg.setSentAt(System.currentTimeMillis());
 
-        @Override
-        protected void onPostExecute(String result) {
-            Toast.makeText(ChatActivity.this, result, Toast.LENGTH_LONG).show();
-            if (result.equals("Send message successfully! ")) {
-                // 刷新消息列表
-                new FetchMessagesTask().execute();
+                msg.setIsSynced(1);
+                list.add(msg);
             }
+        } catch (Exception e) {
+            e.printStackTrace();
         }
+        return list;
+    }
+
+    @Override
+    protected void onDestroy() {
+        super.onDestroy();
+        executor.shutdownNow();
     }
 }
